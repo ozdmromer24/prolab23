@@ -1,0 +1,880 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace IzmitTransportationSystem
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            Console.OutputEncoding = System.Text.Encoding.UTF8; // To display emojis
+            Console.WriteLine("Izmit Transportation System");
+            Console.WriteLine("===========================");
+
+            try
+            {
+                // Load transportation data
+                var data = TransportationData.LoadFromJson("veri.json");
+                
+                // Create a route calculator
+                var calculator = new RouteCalculator(data);
+                
+                // Get passenger type
+                Person person = GetPassengerType();
+                
+                // Get payment method
+                PaymentMethod paymentMethod = GetPaymentMethod();
+                
+                // Get start location
+                var startLocation = GetLocation("Please enter your current location");
+                
+                // Get destination
+                var endLocation = GetLocation("Please enter your destination");
+                
+                // Calculate routes
+                var routes = calculator.CalculateRoutes(startLocation, endLocation, person);
+                
+                // Show the calculated routes
+                DisplayRoutes(routes);
+                
+                // Process payment
+                if (routes.Count > 0)
+                {
+                    Console.WriteLine("\nDo you want to proceed with the best route? (Y/N)");
+                    if (Console.ReadLine().Trim().ToUpper() == "Y")
+                    {
+                        var bestRoute = routes.OrderBy(r => r.TotalFare).First();
+                        if (paymentMethod.ProcessPayment(bestRoute.TotalFare))
+                        {
+                            Console.WriteLine($"Payment of {bestRoute.TotalFare:F2} TL processed successfully!");
+                            Console.WriteLine($"Remaining balance: {paymentMethod.Balance:F2} TL");
+                        }
+                        else
+                        {
+                            Console.WriteLine("Insufficient funds for this journey.");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"An error occurred: {ex.Message}");
+            }
+            
+            Console.WriteLine("\nPress any key to exit...");
+            Console.ReadKey();
+        }
+
+        private static Person GetPassengerType()
+        {
+            Console.WriteLine("\nPassenger Type:");
+            Console.WriteLine("1. General");
+            Console.WriteLine("2. Student");
+            Console.WriteLine("3. Elderly (65+)");
+            Console.Write("Please select your passenger type (1-3): ");
+            
+            var choice = GetIntInput(1, 3);
+            
+            return choice switch
+            {
+                1 => new GeneralPerson(),
+                2 => new Student(),
+                3 => new ElderlyPerson(),
+                _ => new GeneralPerson()
+            };
+        }
+
+        private static PaymentMethod GetPaymentMethod()
+        {
+            Console.WriteLine("\nPayment Method:");
+            Console.WriteLine("1. Cash");
+            Console.WriteLine("2. Credit Card");
+            Console.WriteLine("3. KentCard");
+            Console.Write("Please select your payment method (1-3): ");
+            
+            var choice = GetIntInput(1, 3);
+            
+            PaymentMethod method = choice switch
+            {
+                1 => new CashPayment(),
+                2 => new CreditCardPayment(),
+                3 => new KentCardPayment(),
+                _ => new CashPayment()
+            };
+            
+            Console.Write("Enter your balance amount: ");
+            double balance = GetDoubleInput(0, 1000);
+            method.Balance = balance;
+            
+            if (method is CreditCardPayment creditCard)
+            {
+                Console.Write("Enter your credit limit: ");
+                creditCard.Limit = GetDoubleInput(0, 10000);
+            }
+            
+            return method;
+        }
+
+        private static Location GetLocation(string prompt)
+        {
+            Console.WriteLine($"\n{prompt}:");
+            Console.Write("Enter latitude: ");
+            double lat = GetDoubleInput(40.7, 40.9);
+            
+            Console.Write("Enter longitude: ");
+            double lon = GetDoubleInput(29.9, 30.0);
+            
+            return new Location(lat, lon);
+        }
+
+        private static void DisplayRoutes(List<Route> routes)
+        {
+            if (routes.Count == 0)
+            {
+                Console.WriteLine("No routes found.");
+                return;
+            }
+            
+            Console.WriteLine("\nCalculated Routes:");
+            Console.WriteLine("=================");
+            
+            var sortedRoutes = routes.Where(r => r.TotalDistance > 0).OrderBy(r => r.TotalFare).ToList();
+            
+            for (int i = 0; i < sortedRoutes.Count; i++)
+            {
+                var route = sortedRoutes[i];
+                
+                // Determine route type for display
+                string routeType = "Mixed";
+                var vehicleTypes = route.Segments.Select(s => s.Vehicle.Type).Distinct().ToList();
+                
+                if (vehicleTypes.Count == 1)
+                {
+                    routeType = vehicleTypes[0] switch
+                    {
+                        "bus" => "Bus Only",
+                        "tram" => "Tram Only",
+                        "taxi" => "Taxi Only",
+                        _ => "Mixed"
+                    };
+                }
+                else if (vehicleTypes.Contains("bus") && vehicleTypes.Contains("tram"))
+                {
+                    routeType = "Bus + Tram";
+                }
+                
+                Console.WriteLine($"\nRoute Option {i + 1}: {routeType}");
+                Console.WriteLine(route.GetRouteDescription());
+                
+                // Get highlights for this route
+                if (i == 0)
+                {
+                    Console.WriteLine("✅ Most economical option");
+                }
+                
+                if (route.TotalDuration == sortedRoutes.Min(r => r.TotalDuration))
+                {
+                    Console.WriteLine("⚡ Fastest option");
+                }
+                
+                if (route.TransferCount == sortedRoutes.Min(r => r.TransferCount))
+                {
+                    Console.WriteLine("🛑 Least transfers");
+                }
+            }
+        }
+
+        private static int GetIntInput(int min, int max)
+        {
+            int result;
+            while (!int.TryParse(Console.ReadLine(), out result) || result < min || result > max)
+            {
+                Console.Write($"Please enter a valid number between {min} and {max}: ");
+            }
+            return result;
+        }
+
+        private static double GetDoubleInput(double min, double max)
+        {
+            double result;
+            while (!double.TryParse(Console.ReadLine(), out result) || result < min || result > max)
+            {
+                Console.Write($"Please enter a valid number between {min} and {max}: ");
+            }
+            return result;
+        }
+    }
+}// Models.cs
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.IO;
+using System.Text.Json.Serialization;
+
+namespace IzmitTransportationSystem
+{
+    #region Data Models
+    public class TransportationData
+    {
+        public string City { get; set; }
+        public TaxiInfo Taxi { get; set; }
+        public List<Stop> Duraklar { get; set; }
+
+        public static TransportationData LoadFromJson(string filePath)
+        {
+            string jsonString = File.ReadAllText(filePath);
+            return JsonSerializer.Deserialize<TransportationData>(jsonString, new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true
+            });
+        }
+    }
+
+    public class TaxiInfo
+    {
+        [JsonPropertyName("openingFee")]
+        public double OpeningFee { get; set; }
+
+        [JsonPropertyName("costPerKm")]
+        public double CostPerKm { get; set; }
+    }
+
+    public class Stop
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public double Lat { get; set; }
+        public double Lon { get; set; }
+        [JsonPropertyName("sonDurak")]
+        public bool IsTerminal { get; set; }
+        [JsonPropertyName("nextStops")]
+        public List<NextStop> NextStops { get; set; }
+        public Transfer Transfer { get; set; }
+    }
+
+    public class NextStop
+    {
+        [JsonPropertyName("stopId")]
+        public string StopId { get; set; }
+        [JsonPropertyName("mesafe")]
+        public double Distance { get; set; }
+        [JsonPropertyName("sure")]
+        public int Duration { get; set; }
+        [JsonPropertyName("ucret")]
+        public double Fee { get; set; }
+    }
+
+    public class Transfer
+    {
+        [JsonPropertyName("transferStopId")]
+        public string TransferStopId { get; set; }
+        [JsonPropertyName("transferSure")]
+        public int TransferDuration { get; set; }
+        [JsonPropertyName("transferUcret")]
+        public double TransferFee { get; set; }
+    }
+    #endregion
+
+    #region Base Classes
+    public abstract class Person
+    {
+        public string Name { get; set; }
+        public abstract double GetDiscountFactor();
+    }
+
+    public class GeneralPerson : Person
+    {
+        public override double GetDiscountFactor()
+        {
+            return 1.0; // No discount
+        }
+    }
+
+    public class Student : Person
+    {
+        public override double GetDiscountFactor()
+        {
+            return 0.5; // 50% discount
+        }
+    }
+
+    public class ElderlyPerson : Person
+    {
+        public override double GetDiscountFactor()
+        {
+            return 0.25; // 75% discount
+        }
+    }
+
+    public abstract class Vehicle
+    {
+        public string Type { get; protected set; }
+        public abstract double CalculateFare(double distance, Person person);
+        public abstract int CalculateTravelTime(double distance);
+    }
+
+    public class Bus : Vehicle
+    {
+        public Bus()
+        {
+            Type = "bus";
+        }
+
+        public override double CalculateFare(double distance, Person person)
+        {
+            // Base fare calculation for bus
+            double baseFare = distance * 1.0;
+            return baseFare * person.GetDiscountFactor();
+        }
+
+        public override int CalculateTravelTime(double distance)
+        {
+            // Average speed of 25 km/h
+            return (int)(distance / 25 * 60);
+        }
+    }
+
+    public class Tram : Vehicle
+    {
+        public Tram()
+        {
+            Type = "tram";
+        }
+
+        public override double CalculateFare(double distance, Person person)
+        {
+            // Base fare calculation for tram
+            double baseFare = distance * 0.8;
+            return baseFare * person.GetDiscountFactor();
+        }
+
+        public override int CalculateTravelTime(double distance)
+        {
+            // Average speed of 30 km/h
+            return (int)(distance / 30 * 60);
+        }
+    }
+
+    public class Taxi : Vehicle
+    {
+        private readonly double _openingFee;
+        private readonly double _costPerKm;
+
+        public Taxi(double openingFee, double costPerKm)
+        {
+            Type = "taxi";
+            _openingFee = openingFee;
+            _costPerKm = costPerKm;
+        }
+
+        public override double CalculateFare(double distance, Person person)
+        {
+            // Taxi fare calculation - not affected by person type
+            return _openingFee + (_costPerKm * distance);
+        }
+
+        public override int CalculateTravelTime(double distance)
+        {
+            // Average speed of 40 km/h
+            return (int)(distance / 40 * 60);
+        }
+    }
+
+    public abstract class PaymentMethod
+    {
+        public double Balance { get; set; }
+        public abstract bool ProcessPayment(double amount);
+    }
+
+    public class CashPayment : PaymentMethod
+    {
+        public override bool ProcessPayment(double amount)
+        {
+            if (Balance >= amount)
+            {
+                Balance -= amount;
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public class CreditCardPayment : PaymentMethod
+    {
+        public double Limit { get; set; }
+
+        public override bool ProcessPayment(double amount)
+        {
+            if (Balance + Limit >= amount)
+            {
+                if (Balance >= amount)
+                {
+                    Balance -= amount;
+                }
+                else
+                {
+                    amount -= Balance;
+                    Balance = 0;
+                    Limit -= amount;
+                }
+                return true;
+            }
+            return false;
+        }
+    }
+
+    public class KentCardPayment : PaymentMethod
+    {
+        public override bool ProcessPayment(double amount)
+        {
+            if (Balance >= amount)
+            {
+                Balance -= amount;
+                return true;
+            }
+            return false;
+        }
+    }
+    #endregion
+
+    #region Helper Classes
+    public class Location
+    {
+        public double Latitude { get; set; }
+        public double Longitude { get; set; }
+
+        public Location(double lat, double lon)
+        {
+            Latitude = lat;
+            Longitude = lon;
+        }
+
+        public double CalculateDistance(Location other)
+        {
+            // Haversine formula to calculate distance between two coordinates
+            const double r = 6371; // Earth radius in kilometers
+            var dLat = ToRadians(other.Latitude - Latitude);
+            var dLon = ToRadians(other.Longitude - Longitude);
+            var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                   Math.Cos(ToRadians(Latitude)) * Math.Cos(ToRadians(other.Latitude)) *
+                   Math.Sin(dLon / 2) * Math.Sin(dLon / 2);
+            var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+            return r * c;
+        }
+
+        private double ToRadians(double degrees)
+        {
+            return degrees * Math.PI / 180;
+        }
+    }
+
+    public class RouteSegment
+    {
+        public Stop StartStop { get; set; }
+        public Stop EndStop { get; set; }
+        public Vehicle Vehicle { get; set; }
+        public double Distance { get; set; }
+        public int Duration { get; set; }
+        public double Fare { get; set; }
+        public bool IsTransfer { get; set; }
+
+        public RouteSegment(Stop start, Stop end, Vehicle vehicle, double distance, int duration, double fare, bool isTransfer = false)
+        {
+            StartStop = start;
+            EndStop = end;
+            Vehicle = vehicle;
+            Distance = distance;
+            Duration = duration;
+            Fare = fare;
+            IsTransfer = isTransfer;
+        }
+    }
+
+    public class Route
+    {
+        public List<RouteSegment> Segments { get; set; }
+        public double TotalDistance => Segments.Sum(s => s.Distance);
+        public int TotalDuration => Segments.Sum(s => s.Duration);
+        public double TotalFare => Segments.Sum(s => s.Fare);
+        public int TransferCount => Segments.Count(s => s.IsTransfer);
+
+        public Route()
+        {
+            Segments = new List<RouteSegment>();
+        }
+
+        public void AddSegment(RouteSegment segment)
+        {
+            Segments.Add(segment);
+        }
+
+        public string GetRouteDescription()
+        {
+            var description = new System.Text.StringBuilder();
+            description.AppendLine($"Total Distance: {TotalDistance:F2} km");
+            description.AppendLine($"Total Duration: {TotalDuration} minutes");
+            description.AppendLine($"Total Fare: {TotalFare:F2} TL");
+            description.AppendLine($"Number of Transfers: {TransferCount}");
+            description.AppendLine("\nRoute Segments:");
+
+            for (int i = 0; i < Segments.Count; i++)
+            {
+                var segment = Segments[i];
+                string vehicleIcon = segment.Vehicle.Type == "bus" ? "🚌" : 
+                                    segment.Vehicle.Type == "tram" ? "🚋" : 
+                                    segment.Vehicle.Type == "taxi" ? "🚖" : "🚶";
+                
+                string segmentType = segment.IsTransfer ? "Transfer" : segment.Vehicle.Type.ToUpper();
+                
+                description.AppendLine($"{i + 1}. {segment.StartStop?.Name ?? "Your Location"} → {segment.EndStop?.Name ?? "Destination"} ({vehicleIcon} {segmentType})");
+                description.AppendLine($"   ⏳ Duration: {segment.Duration} min");
+                description.AppendLine($"   💰 Fare: {segment.Fare:F2} TL");
+                description.AppendLine($"   📏 Distance: {segment.Distance:F2} km");
+            }
+
+            return description.ToString();
+        }
+    }
+    #endregion
+
+    public class RouteCalculator
+    {
+        private readonly TransportationData _data;
+        private readonly Dictionary<string, Stop> _stopsById;
+        private readonly Bus _bus;
+        private readonly Tram _tram;
+        private readonly Taxi _taxi;
+        private readonly double _walkingDistanceThreshold;
+
+        public RouteCalculator(TransportationData data, double walkingDistanceThreshold = 3.0)
+        {
+            _data = data;
+            _stopsById = data.Duraklar.ToDictionary(s => s.Id);
+            _bus = new Bus();
+            _tram = new Tram();
+            _taxi = new Taxi(data.Taxi.OpeningFee, data.Taxi.CostPerKm);
+            _walkingDistanceThreshold = walkingDistanceThreshold;
+        }
+
+        public Stop FindNearestStop(Location location, string preferredType = null)
+        {
+            var stops = preferredType != null 
+                ? _data.Duraklar.Where(s => s.Type == preferredType).ToList() 
+                : _data.Duraklar;
+
+            return stops.OrderBy(s => new Location(s.Lat, s.Lon).CalculateDistance(location)).First();
+        }
+
+        public List<Route> CalculateRoutes(Location startLocation, Location endLocation, Person person)
+        {
+            var routes = new List<Route>();
+            
+            // Find nearest stops to start and end locations
+            var startStop = FindNearestStop(startLocation);
+            var endStop = FindNearestStop(endLocation);
+            
+            var startDistance = new Location(startStop.Lat, startStop.Lon).CalculateDistance(startLocation);
+            var endDistance = new Location(endStop.Lat, endStop.Lon).CalculateDistance(endLocation);
+
+            // Add bus-only route
+            routes.Add(CalculateBusOnlyRoute(startLocation, endLocation, startStop, endStop, person, startDistance, endDistance));
+            
+            // Add tram-only route if possible
+            var tramStartStop = FindNearestStop(startLocation, "tram");
+            var tramEndStop = FindNearestStop(endLocation, "tram");
+            routes.Add(CalculateTramOnlyRoute(startLocation, endLocation, tramStartStop, tramEndStop, person));
+            
+            // Add combined bus+tram route
+            routes.Add(CalculateCombinedRoute(startLocation, endLocation, person));
+            
+            // Add taxi-only route
+            routes.Add(CalculateTaxiOnlyRoute(startLocation, endLocation, person));
+
+            return routes;
+        }
+
+        private Route CalculateBusOnlyRoute(Location startLocation, Location endLocation, Stop startStop, Stop endStop, Person person,
+            double startDistance, double endDistance)
+        {
+            var route = new Route();
+            
+            // Add initial segment (walking or taxi)
+            if (startDistance <= _walkingDistanceThreshold)
+            {
+                // Walking segment - assumed to be free and take 1 minute per 100 meters
+                route.AddSegment(new RouteSegment(
+                    null, startStop, new Bus(), startDistance, (int)(startDistance * 10), 0));
+            }
+            else
+            {
+                // Taxi segment
+                route.AddSegment(new RouteSegment(
+                    null, startStop, _taxi, startDistance, 
+                    _taxi.CalculateTravelTime(startDistance), 
+                    _taxi.CalculateFare(startDistance, person)));
+            }
+            
+            // Calculate bus route
+            CalculateBusRoute(startStop, endStop, route, person);
+            
+            // Add final segment if necessary
+            if (endDistance > _walkingDistanceThreshold)
+            {
+                route.AddSegment(new RouteSegment(
+                    endStop, null, _taxi, endDistance, 
+                    _taxi.CalculateTravelTime(endDistance), 
+                    _taxi.CalculateFare(endDistance, person)));
+            }
+            else
+            {
+                route.AddSegment(new RouteSegment(
+                    endStop, null, new Bus(), endDistance, (int)(endDistance * 10), 0));
+            }
+            
+            return route;
+        }
+
+        private void CalculateBusRoute(Stop start, Stop end, Route route, Person person)
+        {
+            // Simple implementation - this would ideally use a proper pathfinding algorithm
+            // For demonstration, we'll use a very basic approach
+            
+            var visited = new HashSet<string>();
+            var queue = new Queue<(Stop, List<RouteSegment>)>();
+            
+            queue.Enqueue((start, new List<RouteSegment>()));
+            visited.Add(start.Id);
+            
+            while (queue.Count > 0)
+            {
+                var (current, segments) = queue.Dequeue();
+                
+                if (current.Id == end.Id)
+                {
+                    // Found a path
+                    foreach (var segment in segments)
+                    {
+                        route.AddSegment(segment);
+                    }
+                    return;
+                }
+                
+                foreach (var nextStopInfo in current.NextStops ?? new List<NextStop>())
+                {
+                    if (_stopsById.TryGetValue(nextStopInfo.StopId, out var nextStop) && !visited.Contains(nextStop.Id))
+                    {
+                        visited.Add(nextStop.Id);
+                        
+                        var newSegments = new List<RouteSegment>(segments)
+                        {
+                            new RouteSegment(
+                                current, nextStop, 
+                                nextStop.Type == "bus" ? _bus : _tram, 
+                                nextStopInfo.Distance, 
+                                nextStopInfo.Duration, 
+                                nextStopInfo.Fee * person.GetDiscountFactor())
+                        };
+                        
+                        queue.Enqueue((nextStop, newSegments));
+                    }
+                }
+                
+                // Check for transfer if available
+                if (current.Transfer != null && _stopsById.TryGetValue(current.Transfer.TransferStopId, out var transferStop) && !visited.Contains(transferStop.Id))
+                {
+                    visited.Add(transferStop.Id);
+                    
+                    var newSegments = new List<RouteSegment>(segments)
+                    {
+                        new RouteSegment(
+                            current, transferStop, 
+                            transferStop.Type == "bus" ? _bus : _tram, 
+                            0, // Distance is negligible for transfer
+                            current.Transfer.TransferDuration, 
+                            current.Transfer.TransferFee * person.GetDiscountFactor(),
+                            true) // This is a transfer
+                    };
+                    
+                    queue.Enqueue((transferStop, newSegments));
+                }
+            }
+            
+            // If we get here, no path was found
+            // Add a dummy segment to show this is not possible
+            route.AddSegment(new RouteSegment(
+                start, start, _bus, 0, 0, 0));
+        }
+
+        private Route CalculateTramOnlyRoute(Location startLocation, Location endLocation, Stop startStop, Stop endStop, Person person)
+        {
+            var route = new Route();
+            
+            var startDistance = new Location(startStop.Lat, startStop.Lon).CalculateDistance(startLocation);
+            var endDistance = new Location(endStop.Lat, endStop.Lon).CalculateDistance(endLocation);
+            
+            // Add initial segment (walking or taxi)
+            if (startDistance <= _walkingDistanceThreshold)
+            {
+                route.AddSegment(new RouteSegment(
+                    null, startStop, new Tram(), startDistance, (int)(startDistance * 10), 0));
+            }
+            else
+            {
+                route.AddSegment(new RouteSegment(
+                    null, startStop, _taxi, startDistance, 
+                    _taxi.CalculateTravelTime(startDistance), 
+                    _taxi.CalculateFare(startDistance, person)));
+            }
+            
+            // Calculate tram route
+            CalculateTramRoute(startStop, endStop, route, person);
+            
+            // Add final segment if necessary
+            if (endDistance > _walkingDistanceThreshold)
+            {
+                route.AddSegment(new RouteSegment(
+                    endStop, null, _taxi, endDistance, 
+                    _taxi.CalculateTravelTime(endDistance), 
+                    _taxi.CalculateFare(endDistance, person)));
+            }
+            else
+            {
+                route.AddSegment(new RouteSegment(
+                    endStop, null, new Tram(), endDistance, (int)(endDistance * 10), 0));
+            }
+            
+            return route;
+        }
+
+        private void CalculateTramRoute(Stop start, Stop end, Route route, Person person)
+        {
+            // Similar to CalculateBusRoute but looking for tram stops
+            var visited = new HashSet<string>();
+            var queue = new Queue<(Stop, List<RouteSegment>)>();
+            
+            queue.Enqueue((start, new List<RouteSegment>()));
+            visited.Add(start.Id);
+            
+            while (queue.Count > 0)
+            {
+                var (current, segments) = queue.Dequeue();
+                
+                if (current.Id == end.Id)
+                {
+                    // Found a path
+                    foreach (var segment in segments)
+                    {
+                        route.AddSegment(segment);
+                    }
+                    return;
+                }
+                
+                foreach (var nextStopInfo in current.NextStops ?? new List<NextStop>())
+                {
+                    if (_stopsById.TryGetValue(nextStopInfo.StopId, out var nextStop) && 
+                        nextStop.Type == "tram" && !visited.Contains(nextStop.Id))
+                    {
+                        visited.Add(nextStop.Id);
+                        
+                        var newSegments = new List<RouteSegment>(segments)
+                        {
+                            new RouteSegment(
+                                current, nextStop, _tram, 
+                                nextStopInfo.Distance, 
+                                nextStopInfo.Duration, 
+                                nextStopInfo.Fee * person.GetDiscountFactor())
+                        };
+                        
+                        queue.Enqueue((nextStop, newSegments));
+                    }
+                }
+            }
+            
+            // If we get here, no path was found
+        }
+
+        private Route CalculateCombinedRoute(Location startLocation, Location endLocation, Person person)
+        {
+            // This would implement a more complex routing algorithm combining both transportation types
+            // For demonstration, we'll just create a simple combined route
+            
+            var route = new Route();
+            
+            var startBusStop = FindNearestStop(startLocation, "bus");
+            var endTramStop = FindNearestStop(endLocation, "tram");
+            
+            var startDistance = new Location(startBusStop.Lat, startBusStop.Lon).CalculateDistance(startLocation);
+            var endDistance = new Location(endTramStop.Lat, endTramStop.Lon).CalculateDistance(endLocation);
+            
+            // Initial segment
+            if (startDistance <= _walkingDistanceThreshold)
+            {
+                route.AddSegment(new RouteSegment(
+                    null, startBusStop, new Bus(), startDistance, (int)(startDistance * 10), 0));
+            }
+            else
+            {
+                route.AddSegment(new RouteSegment(
+                    null, startBusStop, _taxi, startDistance, 
+                    _taxi.CalculateTravelTime(startDistance), 
+                    _taxi.CalculateFare(startDistance, person)));
+            }
+            
+            // Find a transfer point from bus to tram
+            var transferPoint = _data.Duraklar
+                .Where(s => s.Type == "bus" && s.Transfer != null && s.Transfer.TransferStopId.StartsWith("tram_"))
+                .OrderBy(s => new Location(s.Lat, s.Lon).CalculateDistance(new Location(startBusStop.Lat, startBusStop.Lon)))
+                .FirstOrDefault();
+            
+            if (transferPoint != null)
+            {
+                // Add bus segment to transfer point
+                CalculateBusRoute(startBusStop, transferPoint, route, person);
+                
+                // Add transfer segment
+                var transferTo = _stopsById[transferPoint.Transfer.TransferStopId];
+                route.AddSegment(new RouteSegment(
+                    transferPoint, transferTo, _tram, 
+                    0, transferPoint.Transfer.TransferDuration, 
+                    transferPoint.Transfer.TransferFee * person.GetDiscountFactor(),
+                    true));
+                
+                // Add tram segment from transfer to destination
+                CalculateTramRoute(transferTo, endTramStop, route, person);
+            }
+            
+            // Final segment
+            if (endDistance > _walkingDistanceThreshold)
+            {
+                route.AddSegment(new RouteSegment(
+                    endTramStop, null, _taxi, endDistance, 
+                    _taxi.CalculateTravelTime(endDistance), 
+                    _taxi.CalculateFare(endDistance, person)));
+            }
+            else
+            {
+                route.AddSegment(new RouteSegment(
+                    endTramStop, null, new Tram(), endDistance, (int)(endDistance * 10), 0));
+            }
+            
+            return route;
+        }
+
+        private Route CalculateTaxiOnlyRoute(Location startLocation, Location endLocation, Person person)
+        {
+            var route = new Route();
+            
+            var distance = startLocation.CalculateDistance(endLocation);
+            var duration = _taxi.CalculateTravelTime(distance);
+            var fare = _taxi.CalculateFare(distance, person);
+            
+            route.AddSegment(new RouteSegment(
+                null, null, _taxi, distance, duration, fare));
+            
+            return route;
+        }
+    }
+}
